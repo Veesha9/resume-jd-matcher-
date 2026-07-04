@@ -1,6 +1,7 @@
 """
 Resume vs Job Description Matcher
-Phase 3: Polished UI + clearer insights
+Phase 4: Compare resume against MULTIPLE job descriptions at once,
+ranked by match score, so you can see which role fits you best.
 
 Run with:  streamlit run app.py
 """
@@ -11,34 +12,72 @@ from utils.matcher import compute_match_score, get_skill_gap
 
 st.set_page_config(page_title="Resume vs JD Matcher", page_icon="📄", layout="centered")
 
-# ---------- Header ----------
 st.title("📄 Resume vs Job Description Matcher")
-st.caption("Upload your resume, paste a job description, and get an instant match score + skill gap analysis.")
+st.caption(
+    "Upload your resume once, add multiple job descriptions, and see which "
+    "role you're the strongest match for."
+)
 
-# ---------- Inputs ----------
-col1, col2 = st.columns(2)
+# ---------- Session state setup ----------
+# Each JD entry is a dict: {"title": str, "text": str}
+if "jd_entries" not in st.session_state:
+    st.session_state.jd_entries = [{"title": "", "text": ""}]
 
-with col1:
-    st.subheader("1️⃣ Your Resume")
-    uploaded_file = st.file_uploader("Upload resume (PDF only)", type=["pdf"], label_visibility="collapsed")
 
-with col2:
-    st.subheader("2️⃣ Job Description")
-    jd_text = st.text_area(
-        "Paste the job description here",
-        height=200,
-        placeholder="Paste the full job description text here...",
-        label_visibility="collapsed",
-    )
+def add_jd():
+    st.session_state.jd_entries.append({"title": "", "text": ""})
 
-analyze_clicked = st.button("🔍 Analyze Match", type="primary", use_container_width=True)
+
+def remove_jd(index):
+    st.session_state.jd_entries.pop(index)
+
+
+# ---------- Resume upload ----------
+st.subheader("1️⃣ Your Resume")
+uploaded_file = st.file_uploader("Upload resume (PDF only)", type=["pdf"], label_visibility="collapsed")
+
+st.divider()
+
+# ---------- Job description entries ----------
+st.subheader("2️⃣ Job Descriptions to Compare")
+
+for i, entry in enumerate(st.session_state.jd_entries):
+    with st.container(border=True):
+        col_title, col_remove = st.columns([5, 1])
+        with col_title:
+            st.session_state.jd_entries[i]["title"] = st.text_input(
+                "Job title / company (label for this JD)",
+                value=entry["title"],
+                key=f"title_{i}",
+                placeholder=f"e.g. Data Analyst Intern @ Company {i + 1}",
+            )
+        with col_remove:
+            st.write("")  # spacer to align button with input
+            if len(st.session_state.jd_entries) > 1:
+                st.button("🗑️ Remove", key=f"remove_{i}", on_click=remove_jd, args=(i,))
+
+        st.session_state.jd_entries[i]["text"] = st.text_area(
+            "Paste job description",
+            value=entry["text"],
+            key=f"text_{i}",
+            height=150,
+            placeholder="Paste the full job description text here...",
+            label_visibility="collapsed",
+        )
+
+st.button("➕ Add another job description", on_click=add_jd, use_container_width=True)
+
+st.divider()
+analyze_clicked = st.button("🔍 Compare All Matches", type="primary", use_container_width=True)
 
 # ---------- Analysis ----------
 if analyze_clicked:
+    valid_jds = [e for e in st.session_state.jd_entries if e["text"].strip()]
+
     if uploaded_file is None:
         st.warning("Please upload your resume PDF first.")
-    elif not jd_text.strip():
-        st.warning("Please paste a job description first.")
+    elif not valid_jds:
+        st.warning("Please paste at least one job description first.")
     else:
         with st.spinner("Extracting resume text..."):
             try:
@@ -47,78 +86,55 @@ if analyze_clicked:
                 st.error(str(e))
                 st.stop()
 
-        with st.spinner("Analyzing match..."):
-            score = compute_match_score(resume_text, jd_text)
-            gap = get_skill_gap(resume_text, jd_text)
+        with st.spinner(f"Analyzing {len(valid_jds)} job description(s)..."):
+            results = []
+            for idx, jd in enumerate(valid_jds):
+                label = jd["title"].strip() or f"Job Description {idx + 1}"
+                score = compute_match_score(resume_text, jd["text"])
+                gap = get_skill_gap(resume_text, jd["text"])
+                results.append({"label": label, "score": score, "gap": gap})
 
-        total_jd_skills = len(gap["matched"]) + len(gap["missing"])
-        coverage = round((len(gap["matched"]) / total_jd_skills) * 100) if total_jd_skills else None
-
-        st.divider()
-
-        # --- Top metrics row ---
-        m1, m2, m3 = st.columns(3)
-        m1.metric("Overall Match Score", f"{score}%")
-        m2.metric("Skills Matched", f"{len(gap['matched'])}/{total_jd_skills}" if total_jd_skills else "N/A")
-        m3.metric("Bonus Skills Found", len(gap["resume_only"]))
-
-        # --- Score banner ---
-        if score >= 70:
-            st.success(f"🎯 **Strong match ({score}%)** — your resume aligns well with this role.")
-        elif score >= 40:
-            st.warning(f"⚖️ **Moderate match ({score}%)** — some tailoring will help.")
-        else:
-            st.error(f"⚠️ **Low match ({score}%)** — consider rewording your resume to mirror the JD's language.")
-
-        st.progress(min(int(score), 100))
-
-        with st.expander("ℹ️ How is this score calculated?"):
-            st.markdown(
-                "- **Overall Match Score** uses *TF-IDF + cosine similarity* — it measures how "
-                "closely the overall wording/content of your resume overlaps with the JD's wording.\n"
-                "- **Skills Matched** is a separate, more literal check against a curated list of "
-                "~90 common tech & soft skills.\n"
-                "- A low overall score with good skill coverage usually means the JD has a lot of "
-                "generic company text (about us, benefits, etc.) — try mirroring the JD's exact "
-                "phrasing in your resume to boost this."
-            )
+            # Rank best to worst
+            results.sort(key=lambda r: r["score"], reverse=True)
 
         st.divider()
+        st.subheader("🏆 Ranking — Best Match First")
 
-        # --- Skill breakdown tabs ---
-        st.subheader("🧩 Skill Breakdown")
-        tab1, tab2, tab3 = st.tabs([
-            f"✅ Matched ({len(gap['matched'])})",
-            f"❌ Missing ({len(gap['missing'])})",
-            f"➕ Bonus ({len(gap['resume_only'])})",
-        ])
+        for rank, r in enumerate(results, start=1):
+            medal = {1: "🥇", 2: "🥈", 3: "🥉"}.get(rank, f"#{rank}")
+            total_skills = len(r["gap"]["matched"]) + len(r["gap"]["missing"])
 
-        with tab1:
-            if gap["matched"]:
-                st.markdown(" ".join([f"`{s}`" for s in gap["matched"]]))
-            else:
-                st.caption("No overlapping skills detected.")
+            with st.container(border=True):
+                c1, c2, c3 = st.columns([1, 4, 2])
+                c1.markdown(f"### {medal}")
+                c2.markdown(f"**{r['label']}**")
+                c3.metric("Match Score", f"{r['score']}%", label_visibility="collapsed")
 
-        with tab2:
-            if gap["missing"]:
-                st.markdown(" ".join([f"`{s}`" for s in gap["missing"]]))
-                st.info(
-                    "💡 If you genuinely have experience with any of these, add them to your resume "
-                    "using the JD's exact wording — that improves both the score and ATS keyword matching."
-                )
-            else:
-                st.caption("🎉 No missing skills — great coverage for this role!")
+                st.progress(min(int(r["score"]), 100))
 
-        with tab3:
-            if gap["resume_only"]:
-                st.markdown(" ".join([f"`{s}`" for s in gap["resume_only"]]))
-                st.caption("These are on your resume but weren't explicitly asked for in this JD.")
-            else:
-                st.caption("No extra skills detected beyond what the JD asks for.")
+                with st.expander(f"See skill breakdown for {r['label']}"):
+                    t1, t2, t3 = st.tabs([
+                        f"✅ Matched ({len(r['gap']['matched'])})",
+                        f"❌ Missing ({len(r['gap']['missing'])})",
+                        f"➕ Bonus ({len(r['gap']['resume_only'])})",
+                    ])
+                    with t1:
+                        st.markdown(" ".join([f"`{s}`" for s in r["gap"]["matched"]]) or "_None found_")
+                    with t2:
+                        st.markdown(" ".join([f"`{s}`" for s in r["gap"]["missing"]]) or "_None — great coverage!_")
+                    with t3:
+                        st.markdown(" ".join([f"`{s}`" for s in r["gap"]["resume_only"]]) or "_None found_")
 
         st.divider()
+        best = results[0]
+        st.success(
+            f"💡 Based on this comparison, **{best['label']}** ({best['score']}%) is your strongest "
+            f"match. Consider prioritizing this application, or use the missing skills from lower-ranked "
+            f"roles to guide what to learn next."
+        )
+
         with st.expander("📄 Show extracted resume text"):
             st.text_area("Resume text", resume_text, height=300, label_visibility="collapsed")
 
 else:
-    st.info("👆 Upload your resume and paste a job description, then click **Analyze Match**.")
+    st.info("👆 Upload your resume, add one or more job descriptions, then click **Compare All Matches**.")
